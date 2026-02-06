@@ -1,0 +1,5 @@
+option('force-static-roc',
+  type: 'boolean',
+  value: false,
+  description: 'Force building roc-toolkit statically from 3rdparty instead of using system package'
+)
