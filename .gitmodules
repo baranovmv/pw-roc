@@ -1,0 +1,4 @@
+[submodule "3rdparty/roc-toolkit"]
+	path = 3rdparty/roc-toolkit
+	url = https://github.com/roc-streaming/roc-toolkit.git
+	branch = develop
