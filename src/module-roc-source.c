@@ -44,9 +44,19 @@
  * - `local.repair.port = <str>`: local receiver TCP/UDP port for receiver packets
  * - `local.control.port = <str>`: local receiver TCP/UDP port for control packets
  * - `sess.latency.msec = <str>`: target network latency in milliseconds
- * - `resampler.profile = <str>`: Possible values: `disable`, `high`,
- *   `medium`, `low`.
- * - `fec.code = <str>`: Possible values: `disable`, `rs8m`, `ldpc`
+ * - `roc.resampler.backend = <str>`: Possible values: `default`, `builtin`,
+ *       `speex`, `speexdec`.
+ * - `roc.resampler.profile = <str>`: Possible values: `default`, `high`,
+ *       `medium`, `low`.
+ * - `roc.latency-tuner.backend = <str>`: Possible values: `default`, `niq`
+ * - `roc.latency-tuner.profile = <str>`: Possible values: `default`, `intact`,
+ *       `responsive`, `gradual`
+ * - `fec.code = <str>`: Possible values: `default`, `disable`, `rs8m`, `ldpc`
+ *
+ * - `resampler.profile = <str>`: Deprecated, use roc.resampler.profile
+ * - `log.level = <str>`: log level for roc-toolkit. Possible values: `DEFAULT`,
+ *       `NONE`, `ERROR`, `INFO`, `DEBUG`, `TRACE`; `DEFAULT` follows the log
+ * level of the PipeWire context.
  *
  * ## General options
  *
@@ -54,15 +64,22 @@
  *
  * - \ref PW_KEY_NODE_NAME
  * - \ref PW_KEY_NODE_DESCRIPTION
- * - \ref PW_KEY_MEDIA_NAME
+ * - \ref PW_KEY_NODE_VIRTUAL
+ * - \ref PW_KEY_MEDIA_CLASS
+ * - \ref SPA_KEY_AUDIO_POSITION
  *
  * ## Example configuration
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-roc-source.conf
+ *
  * context.modules = [
  *  {   name = libpipewire-module-roc-source
  *      args = {
  *          local.ip = 0.0.0.0
- *          resampler.profile = medium
+ *          #roc.resampler.backend = default
+ *          roc.resampler.profile = medium
+ *          #roc.latency-tuner.backend = default
+ *          #roc.latency-tuner.profile = default
  *          fec.code = disable
  *          sess.latency.msec = 5000
  *          local.source.port = 10001
@@ -72,6 +89,8 @@
  *          source.props = {
  *             node.name = "roc-source"
  *          }
+ *          audio.position = [ FL FR ]
+ *          log.level = DEFAULT
  *      }
  *  }
  *]
@@ -81,8 +100,9 @@
 
 #define NAME "roc-source"
 
-PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
+PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
+PW_LOG_TOPIC_EXTERN(roc_log_topic);
 
 struct module_roc_source_data {
 	struct pw_impl_module *module;
@@ -106,6 +126,9 @@ struct module_roc_source_data {
 	roc_receiver *receiver;
 
 	roc_resampler_profile resampler_profile;
+	roc_resampler_backend resampler_backend;
+	roc_latency_tuner_backend latency_tuner_backend;
+	roc_latency_tuner_profile latency_tuner_profile;
 	roc_fec_encoding fec_code;
 	uint32_t rate;
 	char *local_ip;
@@ -115,6 +138,8 @@ struct module_roc_source_data {
 
 	roc_endpoint *local_control_addr;
 	int local_control_port;
+
+	roc_log_level loglevel;
 };
 
 static void stream_destroy(void *d)
@@ -224,12 +249,12 @@ static void impl_destroy(struct module_roc_source_data *data)
 
 	pw_properties_free(data->playback_props);
 
-  roc_receiver_close(data->receiver);
-  roc_context_close(data->context);
+	roc_receiver_close(data->receiver);
+	roc_context_close(data->context);
 
-  roc_endpoint_deallocate(data->local_source_addr);
-  roc_endpoint_deallocate(data->local_repair_addr);
-  roc_endpoint_deallocate(data->local_control_addr);
+	roc_endpoint_deallocate(data->local_source_addr);
+	roc_endpoint_deallocate(data->local_repair_addr);
+	roc_endpoint_deallocate(data->local_control_addr);
 
 	free(data->local_ip);
 	free(data);
@@ -269,17 +294,33 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	spa_zero(receiver_config);
 
 	receiver_config.frame_encoding.rate = data->rate;
-	receiver_config.frame_encoding.channels = ROC_CHANNEL_LAYOUT_STEREO;
 	receiver_config.frame_encoding.format = ROC_FORMAT_PCM_FLOAT32;
 	receiver_config.resampler_profile = data->resampler_profile;
+	receiver_config.resampler_backend = data->resampler_backend;
+	receiver_config.latency_tuner_backend = data->latency_tuner_backend;
+	receiver_config.latency_tuner_profile = data->latency_tuner_profile;
 
-	info.rate = data->rate;
 
 	/* Fixed to be the same as ROC receiver config above */
-	info.channels = 2;
+	info.rate = data->rate;
 	info.format = SPA_AUDIO_FORMAT_F32;
-	info.position[0] = SPA_AUDIO_CHANNEL_FL;
-	info.position[1] = SPA_AUDIO_CHANNEL_FR;
+
+	const char* positions = pw_properties_get(data->playback_props, SPA_KEY_AUDIO_POSITION);
+	int channels = pw_roc_spa_audio_parse_position_n(positions, strlen(positions), info.position, SPA_N_ELEMENTS(info.position), &info.channels);
+
+	if(channels == 2) {
+		receiver_config.frame_encoding.channels = ROC_CHANNEL_LAYOUT_STEREO;
+	} else {
+		receiver_config.frame_encoding.channels = ROC_CHANNEL_LAYOUT_MULTITRACK;
+		receiver_config.frame_encoding.tracks = channels;
+
+		res = roc_context_register_encoding(data->context, PW_ROC_MULTITRACK_ENCODING_ID, &receiver_config.frame_encoding);
+		if(res) {
+			pw_log_error("failed to register encoding: %d", res);
+			return -EINVAL;
+		}
+	}
+
 	data->stride = info.channels * sizeof(float);
 
 	pw_properties_setf(data->playback_props, PW_KEY_NODE_RATE, "1/%d", info.rate);
@@ -296,6 +337,8 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	 * https://roc-streaming.org/toolkit/docs/api/reference.html
 	 */
 	receiver_config.target_latency = (unsigned long long)data->sess_latency_msec * SPA_NSEC_PER_MSEC;
+
+	pw_roc_log_init();
 
 	res = roc_receiver_open(data->context, &receiver_config, &data->receiver);
 	if (res) {
@@ -374,14 +417,19 @@ static const struct spa_dict_item module_roc_source_info[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Sanchayan Maity <sanchayan@asymptotic.io>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "roc source" },
 	{ PW_KEY_MODULE_USAGE,	"( source.name=<name for the source> ) "
-				"( resampler.profile=<empty>|disable|high|medium|low ) "
+				"( roc.resampler.backend=<empty>|default|builtin|speex|speexdec ) "
+				"( roc.resampler.profile=<empty>|default|high|medium|low ) "
+				"( roc.latency-tuner.backend=<empty>|default|niq ) "
+				"( roc.latency-tuner.profile=<empty>|default|intact|responsive|gradual ) "
 				"( fec.code=<empty>|disable|rs8m|ldpc ) "
 				"( sess.latency.msec=<target network latency in milliseconds> ) "
 				"( local.ip=<local receiver ip> ) "
 				"( local.source.port=<local receiver port for source packets> ) "
 				"( local.repair.port=<local receiver port for repair packets> ) "
 				"( local.control.port=<local receiver port for control packets> ) "
-				"( source.props= { key=value ... } ) " },
+				"( audio.position=<channel map, default:"PW_ROC_STEREO_POSITIONS"> ) "
+				"( source.props= { key=value ... } ) "
+				"( log.level=<empty>|DEFAULT|NONE|RROR|INFO|DEBUG|TRACE ) " },
 	{ PW_KEY_MODULE_VERSION, pw_get_headers_version() },
 };
 
@@ -437,6 +485,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (pw_properties_get(playback_props, PW_KEY_NODE_NETWORK) == NULL)
 		pw_properties_set(playback_props, PW_KEY_NODE_NETWORK, "true");
 
+	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL) {
+		pw_properties_set(playback_props, SPA_KEY_AUDIO_POSITION, str);
+	} else {
+		pw_properties_set(playback_props, SPA_KEY_AUDIO_POSITION, PW_ROC_STEREO_POSITIONS);
+	}
+
 	data->rate = pw_properties_get_uint32(playback_props, PW_KEY_AUDIO_RATE, 0);
 	if (data->rate == 0)
 		data->rate = PW_ROC_DEFAULT_RATE;
@@ -470,14 +524,38 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	} else {
 		data->sess_latency_msec = PW_ROC_DEFAULT_SESS_LATENCY;
 	}
-
-	if ((str = pw_properties_get(props, "resampler.profile")) != NULL) {
+	if ((str = pw_properties_get(props, "roc.resampler.backend")) != NULL) {
+		if (pw_roc_parse_resampler_backend(&data->resampler_backend, str)) {
+			pw_log_warn("Invalid resampler backend %s, using default", str);
+			data->resampler_backend = ROC_RESAMPLER_BACKEND_DEFAULT;
+		}
+	} else {
+		data->resampler_backend = ROC_RESAMPLER_BACKEND_DEFAULT;
+	}
+	if ((str = pw_properties_get(props, "roc.resampler.profile")) != NULL ||
+	    (str = pw_properties_get(props, "resampler.profile")) != NULL) {
 		if (pw_roc_parse_resampler_profile(&data->resampler_profile, str)) {
 			pw_log_warn("Invalid resampler profile %s, using default", str);
 			data->resampler_profile = ROC_RESAMPLER_PROFILE_DEFAULT;
 		}
 	} else {
 		data->resampler_profile = ROC_RESAMPLER_PROFILE_DEFAULT;
+	}
+	if ((str = pw_properties_get(props, "roc.latency-tuner.backend")) != NULL) {
+		if (pw_roc_parse_latency_tuner_backend(&data->latency_tuner_backend, str)) {
+			pw_log_warn("Invalid latency-tuner backend %s, using default", str);
+			data->latency_tuner_backend = ROC_LATENCY_TUNER_BACKEND_DEFAULT;
+		}
+	} else {
+		data->latency_tuner_backend = ROC_LATENCY_TUNER_BACKEND_DEFAULT;
+	}
+	if ((str = pw_properties_get(props, "roc.latency-tuner.profile")) != NULL) {
+		if (pw_roc_parse_latency_tuner_profile(&data->latency_tuner_profile, str)) {
+			pw_log_warn("Invalid latency-tuner profile %s, using default", str);
+			data->latency_tuner_profile = ROC_LATENCY_TUNER_PROFILE_DEFAULT;
+		}
+	} else {
+		data->latency_tuner_profile = ROC_LATENCY_TUNER_PROFILE_DEFAULT;
 	}
 	if ((str = pw_properties_get(props, "fec.code")) != NULL) {
 		if (pw_roc_parse_fec_encoding(&data->fec_code, str)) {
@@ -486,6 +564,14 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		}
 	} else {
 		data->fec_code = ROC_FEC_ENCODING_DEFAULT;
+	}
+	if ((str = pw_properties_get(props, "log.level")) != NULL) {
+		const struct spa_log *log_conf = pw_log_get();
+		const roc_log_level default_level = pw_roc_log_level_pw_2_roc(log_conf->level);
+		if (pw_roc_parse_log_level(&data->loglevel, str, default_level)) {
+			pw_log_error("Invalid log level %s, using default", str);
+			data->loglevel = default_level;
+		}
 	}
 
 	data->core = pw_context_get_object(data->module_context, PW_TYPE_INTERFACE_Core);
@@ -522,7 +608,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	return 0;
 out:
-  pw_properties_free(props);
+	pw_properties_free(props);
 	impl_destroy(data);
 	return res;
 }

@@ -92,7 +92,7 @@ spa_dep = dependency('libspa-0.2', required : true, static : false, method : 'pk
 moduledir = pw_dep.get_variable(pkgconfig: 'moduledir')
 deps = [roc_dep, pw_dep, spa_dep]
 
-common_src = files()
+common_src = files('src/module-roc/common.c')
 sink_src = files('src/module-roc-sink.c')
 source_src = files('src/module-roc-source.c')
 sink_plugin = shared_library('pipewire-module-roc-sink',
