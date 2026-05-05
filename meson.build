@@ -106,3 +106,4 @@ source_plugin = shared_library('pipewire-module-roc-source',
   install_dir : moduledir
 )
 
+subdir('tests')
