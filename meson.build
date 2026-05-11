@@ -28,8 +28,21 @@ if force_static_roc or not roc_dep.found()
   
   scons = find_program('scons', required : true)
   roc_install_prefix = meson.project_build_root() / 'roc-toolkit'
-  
+
+  # Force roc-toolkit's scons to use the same compiler family as meson.
+  # Otherwise scons may auto-detect clang while meson uses gcc, leading to
+  # mismatched toolchains and 3rd-party (e.g. openfec) build failures.
+  cc_id = cc.get_id()
+  if cc_id == 'gcc'
+    roc_compiler = 'gcc'
+  elif cc_id == 'clang'
+    roc_compiler = 'clang'
+  else
+    roc_compiler = 'cc'
+  endif
+
   scons_options = [
+    '--compiler=' + roc_compiler,
     '--enable-static',
     '--disable-shared',
     '--disable-tools',
@@ -42,9 +55,16 @@ if force_static_roc or not roc_dep.found()
   ]
   
   message('Building roc-toolkit with scons...')
+  # openfec's CMakeLists.txt declares cmake_minimum_required(VERSION 2.x).
+  # CMake >= 4.0 (shipped in ubuntu:26.04, fedora rawhide, alpine edge, etc.)
+  # removes compatibility with < 3.5 and refuses to configure. Setting
+  # CMAKE_POLICY_VERSION_MINIMUM=3.5 makes CMake apply 3.5 policies, allowing
+  # configuration to proceed. See https://cmake.org/cmake/help/latest/variable/CMAKE_POLICY_VERSION_MINIMUM.html
+  scons_env_prefix = 'CMAKE_POLICY_VERSION_MINIMUM=3.5 '
   build_result = run_command(
     'sh', '-c',
     'cd "' + roc_toolkit_dir + '" && ' +
+    scons_env_prefix +
     scons.full_path() + ' -Q ' + ' '.join(scons_options),
     check: false,
     capture: true
@@ -59,6 +79,7 @@ if force_static_roc or not roc_dep.found()
   install_result = run_command(
     'sh', '-c',
     'cd "' + roc_toolkit_dir + '" && ' +
+    scons_env_prefix +
     scons.full_path() + ' -Q ' + ' '.join(scons_options) + ' install',
     check: false,
     capture: true

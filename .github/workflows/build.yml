@@ -1,0 +1,78 @@
+name: "build"
+
+on:
+  push:
+    branches:
+      - main
+      - ci_tests
+
+  pull_request:
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - tarabah/env-ubuntu:24.04
+          - tarabah/env-ubuntu:26.04
+          - tarabah/env-debian:bookworm
+          - tarabah/env-debian:trixie
+          - tarabah/env-fedora
+          - tarabah/env-archlinux
+          - tarabah/env-opensuse
+          - tarabah/env-alpine
+
+    name: x86_64/${{ matrix.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Pull image
+        run: docker pull ${{ matrix.image }}
+
+      - name: Build and test
+        run: |
+          ci/docker.sh ${{ matrix.image }} ci/build.sh
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - tarabah/env-ubuntu:24.04
+          - tarabah/env-ubuntu:26.04
+          - tarabah/env-debian:bookworm
+          - tarabah/env-debian:trixie
+          - tarabah/env-rpios-trixie
+
+    name: arm64/${{ matrix.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Pull image
+        run: docker pull ${{ matrix.image }}
+
+      - name: Build and test
+        run: |
+          ci/docker.sh ${{ matrix.image }} ci/build.sh
