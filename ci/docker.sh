@@ -23,6 +23,8 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 docker run --rm \
     -v "$REPO_DIR":/work \
     -w /work \
+    -e ARTIFACT_NAME="${ARTIFACT_NAME:-}" \
+    -e GITHUB_SHA="${GITHUB_SHA:-}" \
     --entrypoint /work/ci/docker/entrypoint.sh \
     "$IMAGE" \
     "$@"
