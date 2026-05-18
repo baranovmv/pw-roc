@@ -17,5 +17,4 @@ export PIPEWIRE_MODULE_DIR="/work/build:${PW_MODULE_DIR}"
 
 meson setup build -Dforce-static-roc=true
 meson compile -C build
-# PIPEWIRE_DEBUG=3 surfaces module dlopen / load failures in CI logs.
-PIPEWIRE_DEBUG=3 meson test -C build --verbose
+meson test -C build --verbose
