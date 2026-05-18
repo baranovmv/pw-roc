@@ -42,12 +42,25 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Compute artifact name
+        run: |
+          slug=$(echo '${{ matrix.image }}' \
+              | sed -E 's|^[^/]+/env-||; s|:|-|g; s|[^A-Za-z0-9._-]+|-|g')
+          echo "ARTIFACT_NAME=pw-roc-x86_64-${slug}" >> "$GITHUB_ENV"
+
       - name: Pull image
         run: docker pull ${{ matrix.image }}
 
       - name: Build and test
         run: |
           ci/docker.sh ${{ matrix.image }} ci/build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: build/dist/${{ env.ARTIFACT_NAME }}.tar.gz
+          if-no-files-found: error
 
   linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -70,9 +83,22 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Compute artifact name
+        run: |
+          slug=$(echo '${{ matrix.image }}' \
+              | sed -E 's|^[^/]+/env-||; s|:|-|g; s|[^A-Za-z0-9._-]+|-|g')
+          echo "ARTIFACT_NAME=pw-roc-arm64-${slug}" >> "$GITHUB_ENV"
+
       - name: Pull image
         run: docker pull ${{ matrix.image }}
 
       - name: Build and test
         run: |
           ci/docker.sh ${{ matrix.image }} ci/build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: build/dist/${{ env.ARTIFACT_NAME }}.tar.gz
+          if-no-files-found: error
