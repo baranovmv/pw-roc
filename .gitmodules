@@ -2,3 +2,6 @@
 	path = 3rdparty/roc-toolkit
 	url = https://github.com/roc-streaming/roc-toolkit.git
 	branch = develop
+[submodule "3rdparty/dockerfiles"]
+	path = 3rdparty/dockerfiles
+	url = git@github.com:baranovmv/roc-steaming-dockerfiles.git

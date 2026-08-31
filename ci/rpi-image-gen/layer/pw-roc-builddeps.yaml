@@ -1,0 +1,40 @@
+# METABEGIN
+# X-Env-Layer-Name: pw-roc-builddeps
+# X-Env-Layer-Category: development
+# X-Env-Layer-Desc: Build toolchain and PipeWire/SPA dev headers required to
+#  cross-compile the pw-roc PipeWire modules and the bundled roc-toolkit
+#  against Raspberry Pi OS Trixie (arm64).
+# X-Env-Layer-Version: 1.0.0
+# X-Env-Layer-Requires: debian-trixie-arm64-minbase-rolling
+# METAEND
+---
+mmdebstrap:
+  packages:
+    # Build toolchain for pw-roc itself
+    - build-essential
+    - g++
+    - pkg-config
+    - meson
+    - ninja-build
+    - cmake
+    - make
+    - git
+    - ca-certificates
+    - python3
+    # roc-toolkit (bundled, built via SCons)
+    - scons
+    - ragel
+    - gengetopt
+    - libtool
+    - intltool
+    - autoconf
+    - automake
+    - libsndfile1-dev
+    # PipeWire / SPA development headers (Raspberry Pi OS Trixie)
+    - libpipewire-0.3-dev
+    - libspa-0.2-dev
+    # PipeWire runtime stack for integration tests
+    - pipewire
+    - pipewire-bin
+    - wireplumber
+    - dbus

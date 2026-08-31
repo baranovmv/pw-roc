@@ -1,0 +1,24 @@
+# rpi-image-gen config: produce an arm64 Raspberry Pi OS Trixie root
+# filesystem tarball pre-loaded with the build toolchain needed to compile
+# pw-roc and the bundled roc-toolkit.
+#
+# Usage (from repo root, with .rpi-image-gen/ checked out):
+#   .rpi-image-gen/rpi-image-gen build \
+#       -S ci/rpi-image-gen \
+#       -c pw-roc-arm64.yaml
+#
+# Output:
+#   work/pw-roc-arm64/rootfs.tgz   — raw rootfs tarball (no kernel/firmware).
+
+target:
+  context: pw-roc-arm64
+
+artefact:
+  target_name: rootfs.tgz
+
+layer:
+  - debian-trixie-arm64-minbase-rolling
+  - rpi-debian-trixie
+  - rpios-ci-container-policy
+  - ca-certificates
+  - pw-roc-builddeps
