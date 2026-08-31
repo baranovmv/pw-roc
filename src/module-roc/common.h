@@ -177,24 +177,5 @@ static inline enum spa_log_level pw_roc_log_level_roc_2_pw(const roc_log_level r
 	}
 }
 
-static inline int pw_roc_parse_log_level(roc_log_level *loglevel, const char *str,
-																				 roc_log_level default_level)
-{
-	if (spa_streq(str, "DEFAULT"))
-		*loglevel = default_level;
-	else if (spa_streq(str, "NONE"))
-		*loglevel = ROC_LOG_NONE;
-	else if (spa_streq(str, "ERROR"))
-		*loglevel = ROC_LOG_ERROR;
-	else if (spa_streq(str, "INFO"))
-		*loglevel = ROC_LOG_INFO;
-	else if (spa_streq(str, "DEBUG"))
-		*loglevel = ROC_LOG_DEBUG;
-	else if (spa_streq(str, "TRACE"))
-		*loglevel = ROC_LOG_TRACE;
-	else
-		return -EINVAL;
-	return 0;
-}
 
 #endif /* MODULE_ROC_COMMON_H */

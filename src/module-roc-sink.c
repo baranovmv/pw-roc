@@ -44,9 +44,6 @@
  * - `remote.repair.port = <str>`: remote receiver TCP/UDP port for receiver packets
  * - `remote.control.port = <str>`: remote receiver TCP/UDP port for control packets
  * - `fec.code = <str>`: Possible values: `disable`, `rs8m`, `ldpc`
- * - `log.level = <str>`: log level for roc-toolkit. Possible values: `DEFAULT`,
- *       `NONE`, `ERROR`, `INFO`, `DEBUG`, `TRACE`; `DEFAULT` follows the log
- * level of the PipeWire context.
  *
  * ## General options
  *
@@ -76,7 +73,6 @@
  *             node.name = "roc-sink"
  *          }
  *          audio.position = [ FL FR ]
- *          log.level = DEFAULT
  *      }
  *  }
  *]
@@ -119,7 +115,7 @@ struct module_roc_sink_data {
 	roc_endpoint *remote_control_addr;
 	int remote_control_port;
 
-	roc_log_level loglevel;
+	bool sending;
 };
 
 static void stream_destroy(void *d)
@@ -182,6 +178,55 @@ static const struct pw_core_events core_events = {
 	.error = on_core_error,
 };
 
+static int start_sending(struct module_roc_sink_data *data)
+{
+	if (data->sender == NULL || data->sending)
+		return 0;
+	
+	if (data->remote_source_addr != NULL) {
+		if (roc_sender_connect(data->sender, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_SOURCE,
+					data->remote_source_addr) != 0) {
+			pw_log_error("can't connect roc sender to remote source address");
+			goto error;
+		}
+	}
+
+	if (data->remote_repair_addr != NULL) {
+		if (roc_sender_connect(data->sender, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_REPAIR,
+					data->remote_repair_addr) != 0) {
+			pw_log_error("can't connect roc sender to remote repair address");
+			goto error;
+		}
+	}	
+
+	if (data->remote_control_addr != NULL) {
+		if (roc_sender_connect(data->sender, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_CONTROL,
+					data->remote_control_addr) != 0) {
+			pw_log_error("can't connect roc sender to remote control address");
+			goto error;
+		}
+	}
+
+	data->sending = true;
+	return 0;
+error:
+	roc_sender_unlink(data->sender, ROC_SLOT_DEFAULT);
+	return -EINVAL;
+}
+
+static int stop_sending(struct module_roc_sink_data *data)
+{
+	if (data->sender == NULL || !data->sending)
+		return 0;
+
+	if (roc_sender_unlink(data->sender, ROC_SLOT_DEFAULT) != 0)
+		pw_log_warn("can't unlink roc sender");
+
+	data->sending = false;
+
+	return 0;
+}
+
 static void on_stream_state_changed(void *d, enum pw_stream_state old,
 		enum pw_stream_state state, const char *error)
 {
@@ -194,6 +239,13 @@ static void on_stream_state_changed(void *d, enum pw_stream_state old,
 		break;
 	case PW_STREAM_STATE_ERROR:
 		pw_log_error("stream error: %s", error);
+		break;
+	case PW_STREAM_STATE_STREAMING:
+		if (start_sending(data) < 0)
+			pw_impl_module_schedule_destroy(data->module);
+		break;
+	case PW_STREAM_STATE_PAUSED:
+		stop_sending(data);
 		break;
 	default:
 		break;
@@ -284,6 +336,11 @@ static int roc_sink_setup(struct module_roc_sink_data *data)
 	const char* positions = pw_properties_get(data->capture_props, SPA_KEY_AUDIO_POSITION);
 	int channels = pw_roc_spa_audio_parse_position_n(positions, strlen(positions), info.position, SPA_N_ELEMENTS(info.position), &info.channels);
 
+	if (channels < 1) {
+		pw_log_error("invalid channel count %d (check audio.position)", channels);
+		return -EINVAL;
+	}
+
 	if(channels == 2) {
 		sender_config.frame_encoding.channels = ROC_CHANNEL_LAYOUT_STEREO;
 		sender_config.packet_encoding = ROC_PACKET_ENCODING_AVP_L16_STEREO;
@@ -321,11 +378,6 @@ static int roc_sink_setup(struct module_roc_sink_data *data)
 		return res;
 	}
 
-	if (roc_sender_connect(data->sender, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_SOURCE,
-				data->remote_source_addr) != 0) {
-		pw_log_error("can't connect roc sender to remote source address");
-		return -EINVAL;
-	}
 
 	if (repair_proto != 0) {
 		res = pw_roc_create_endpoint(&data->remote_repair_addr, repair_proto, data->remote_ip, data->remote_repair_port);
@@ -333,24 +385,12 @@ static int roc_sink_setup(struct module_roc_sink_data *data)
 			pw_log_error("failed to create repair endpoint: %s", spa_strerror(res));
 			return res;
 		}
-
-		if (roc_sender_connect(data->sender, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_REPAIR,
-					data->remote_repair_addr) != 0) {
-			pw_log_error("can't connect roc sender to remote repair address");
-			return -EINVAL;
-		}
 	}
 
 	res = pw_roc_create_endpoint(&data->remote_control_addr, PW_ROC_DEFAULT_CONTROL_PROTO, data->remote_ip, data->remote_control_port);
 	if (res < 0) {
 		pw_log_error("failed to create control endpoint: %s", spa_strerror(res));
 		return res;
-	}
-
-	if (roc_sender_connect(data->sender, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_CONTROL,
-				data->remote_control_addr) != 0) {
-		pw_log_error("can't connect roc sender to remote control address");
-		return -EINVAL;
 	}
 
 	data->capture = pw_stream_new(data->core,
@@ -389,8 +429,7 @@ static const struct spa_dict_item module_roc_sink_info[] = {
 				"( remote.repair.port=<remote receiver port for repair packets> ) "
 				"( remote.control.port=<remote receiver port for control packets> ) "
 				"( audio.position=<channel map, default:"PW_ROC_STEREO_POSITIONS"> ) "
-				"( sink.props= { key=val ... } ) "
-				"( log.level=<empty>|DEFAULT|NONE|RROR|INFO|DEBUG|TRACE ) " },
+				"( sink.props= { key=val ... } ) " },
 	{ PW_KEY_MODULE_VERSION, pw_get_headers_version()},
 };
 
@@ -510,14 +549,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		res = -errno;
 		pw_log_error("can't connect: %m");
 		goto out;
-	}
-	if ((str = pw_properties_get(props, "log.level")) != NULL) {
-		const struct spa_log *log_conf = pw_log_get();
-		const roc_log_level default_level = pw_roc_log_level_pw_2_roc(log_conf->level);
-		if (pw_roc_parse_log_level(&data->loglevel, str, default_level)) {
-			pw_log_error("Invalid log level %s, using default", str);
-			data->loglevel = default_level;
-		}
 	}
 
 	pw_proxy_add_listener((struct pw_proxy*)data->core,

@@ -54,9 +54,6 @@
  * - `fec.code = <str>`: Possible values: `default`, `disable`, `rs8m`, `ldpc`
  *
  * - `resampler.profile = <str>`: Deprecated, use roc.resampler.profile
- * - `log.level = <str>`: log level for roc-toolkit. Possible values: `DEFAULT`,
- *       `NONE`, `ERROR`, `INFO`, `DEBUG`, `TRACE`; `DEFAULT` follows the log
- * level of the PipeWire context.
  *
  * ## General options
  *
@@ -90,7 +87,6 @@
  *             node.name = "roc-source"
  *          }
  *          audio.position = [ FL FR ]
- *          log.level = DEFAULT
  *      }
  *  }
  *]
@@ -139,7 +135,7 @@ struct module_roc_source_data {
 	roc_endpoint *local_control_addr;
 	int local_control_port;
 
-	roc_log_level loglevel;
+	bool receiving;
 };
 
 static void stream_destroy(void *d)
@@ -203,6 +199,53 @@ static const struct pw_core_events core_events = {
 	.error = on_core_error,
 };
 
+
+static int start_receiving(struct module_roc_source_data *data)
+{
+	if (data->receiver == NULL || data->receiving)
+		return 0;
+
+	if (data->local_source_addr != NULL) {
+		if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_SOURCE,
+					data->local_source_addr) != 0) {
+			pw_log_error("can't connect roc receiver to local source address");
+			goto error;
+		}
+	}
+	if (data->local_repair_addr != NULL) {
+		if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_REPAIR,
+					data->local_repair_addr) != 0) {
+			pw_log_error("can't connect roc receiver to local repair address");
+			goto error;
+		}
+	}
+	if (data->local_control_addr != NULL) {
+		if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_CONTROL,
+					data->local_control_addr) != 0) {
+			pw_log_error("can't connect roc receiver to local control address");
+			goto error;
+		}
+	}
+	data->receiving = true;
+	return 0;
+error:
+	roc_receiver_unlink(data->receiver, ROC_SLOT_DEFAULT);
+	return -EINVAL;
+}
+
+static int stop_receiving(struct module_roc_source_data *data)
+{
+	if (data->receiver == NULL || !data->receiving)
+		return 0;
+
+	if (roc_receiver_unlink(data->receiver, ROC_SLOT_DEFAULT) != 0)
+		pw_log_warn("can't unlink roc receiver");
+
+	data->receiving = false;
+
+	return 0;
+}
+
 static void on_stream_state_changed(void *d, enum pw_stream_state old,
 		enum pw_stream_state state, const char *error)
 {
@@ -215,6 +258,13 @@ static void on_stream_state_changed(void *d, enum pw_stream_state old,
 		break;
 	case PW_STREAM_STATE_ERROR:
 		pw_log_error("stream error: %s", error);
+		break;
+	case PW_STREAM_STATE_STREAMING:
+		if (start_receiving(data) < 0)
+			pw_impl_module_schedule_destroy(data->module);
+		break;
+	case PW_STREAM_STATE_PAUSED:
+		stop_receiving(data);
 		break;
 	default:
 		break;
@@ -308,6 +358,11 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	const char* positions = pw_properties_get(data->playback_props, SPA_KEY_AUDIO_POSITION);
 	int channels = pw_roc_spa_audio_parse_position_n(positions, strlen(positions), info.position, SPA_N_ELEMENTS(info.position), &info.channels);
 
+	if (channels < 1) {
+		pw_log_error("invalid channel count %d (check audio.position)", channels);
+		return -EINVAL;
+	}
+
 	if(channels == 2) {
 		receiver_config.frame_encoding.channels = ROC_CHANNEL_LAYOUT_STEREO;
 	} else {
@@ -354,11 +409,6 @@ static int roc_source_setup(struct module_roc_source_data *data)
 		return res;
 	}
 
-	if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_SOURCE,
-				data->local_source_addr) != 0) {
-		pw_log_error("can't connect roc receiver to local source address");
-		return -EINVAL;
-	}
 
 	if (repair_proto != 0) {
 		res = pw_roc_create_endpoint(&data->local_repair_addr, repair_proto, data->local_ip, data->local_repair_port);
@@ -367,23 +417,12 @@ static int roc_source_setup(struct module_roc_source_data *data)
 			return res;
 		}
 
-		if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_REPAIR,
-					data->local_repair_addr) != 0) {
-			pw_log_error("can't connect roc receiver to local repair address");
-			return -EINVAL;
-		}
 	}
 
 	res = pw_roc_create_endpoint(&data->local_control_addr, PW_ROC_DEFAULT_CONTROL_PROTO, data->local_ip, data->local_control_port);
 	if (res < 0) {
 		pw_log_error("failed to create control endpoint: %s", spa_strerror(res));
 		return res;
-	}
-
-	if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_CONTROL,
-				data->local_control_addr) != 0) {
-		pw_log_error("can't connect roc receiver to local control address");
-		return -EINVAL;
 	}
 
 	data->playback = pw_stream_new(data->core,
@@ -428,8 +467,7 @@ static const struct spa_dict_item module_roc_source_info[] = {
 				"( local.repair.port=<local receiver port for repair packets> ) "
 				"( local.control.port=<local receiver port for control packets> ) "
 				"( audio.position=<channel map, default:"PW_ROC_STEREO_POSITIONS"> ) "
-				"( source.props= { key=value ... } ) "
-				"( log.level=<empty>|DEFAULT|NONE|RROR|INFO|DEBUG|TRACE ) " },
+				"( source.props= { key=value ... } ) " },
 	{ PW_KEY_MODULE_VERSION, pw_get_headers_version() },
 };
 
@@ -502,6 +540,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	} else {
 		data->local_ip = strdup(PW_ROC_DEFAULT_IP);
 	}
+	if (data->local_ip == NULL) {
+		res = -errno;
+		goto out;
+	}
 
 	if ((str = pw_properties_get(props, "local.source.port")) != NULL) {
 		data->local_source_port = pw_properties_parse_int(str);
@@ -566,14 +608,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		}
 	} else {
 		data->fec_code = ROC_FEC_ENCODING_DEFAULT;
-	}
-	if ((str = pw_properties_get(props, "log.level")) != NULL) {
-		const struct spa_log *log_conf = pw_log_get();
-		const roc_log_level default_level = pw_roc_log_level_pw_2_roc(log_conf->level);
-		if (pw_roc_parse_log_level(&data->loglevel, str, default_level)) {
-			pw_log_error("Invalid log level %s, using default", str);
-			data->loglevel = default_level;
-		}
 	}
 
 	data->core = pw_context_get_object(data->module_context, PW_TYPE_INTERFACE_Core);
