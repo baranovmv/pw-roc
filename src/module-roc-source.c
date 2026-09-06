@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <spa/utils/atomic.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/param/audio/format-utils.h>
@@ -28,6 +29,11 @@
  * The `roc-source` module creates a PipeWire source that receives samples
  * from ROC sender and passes them to the sink it is connected to. One can
  * then connect it to any audio device.
+ *
+ * The receiver binds its local ports when the module is loaded and keeps them
+ * bound for the lifetime of the module. The source node stays inactive while
+ * no sender is connected and is activated again as soon as one appears, so a
+ * linked sink goes idle whenever the network stream stops.
  *
  * ## Module Name
  *
@@ -96,6 +102,8 @@
 
 #define NAME "roc-source"
 
+#define POLL_INTERVAL_NSEC (100 * SPA_NSEC_PER_MSEC)
+
 PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 PW_LOG_TOPIC_EXTERN(roc_log_topic);
@@ -135,7 +143,12 @@ struct module_roc_source_data {
 	roc_endpoint *local_control_addr;
 	int local_control_port;
 
-	bool receiving;
+	struct pw_loop *loop;
+	struct spa_source *timer;
+
+	bool bound;
+	bool stream_active;
+	bool read_failed;
 };
 
 static void stream_destroy(void *d)
@@ -165,15 +178,20 @@ static void playback_process(void *data)
 	buf->datas[0].chunk->offset = 0;
 	buf->datas[0].chunk->stride = impl->stride;
 	buf->datas[0].chunk->size = 0;
+	b->size = 0;
+
+	if (SPA_ATOMIC_LOAD(impl->read_failed)) {
+		pw_stream_queue_buffer(impl->playback, b);
+		return;
+	}
 
 	spa_zero(frame);
 	frame.samples = dst;
 	frame.samples_size = SPA_MIN(b->requested * impl->stride, buf->datas[0].maxsize);
 
 	if (roc_receiver_read(impl->receiver, &frame) != 0) {
-		/* Handle EOF and error */
-		pw_log_error("Failed to read from roc source");
-		pw_impl_module_schedule_destroy(impl->module);
+		/* Logged and unloaded from the main loop by on_poll_timer(). */
+		SPA_ATOMIC_STORE(impl->read_failed, true);
 		frame.samples_size = 0;
 	}
 
@@ -200,50 +218,90 @@ static const struct pw_core_events core_events = {
 };
 
 
-static int start_receiving(struct module_roc_source_data *data)
+static int roc_source_bind(struct module_roc_source_data *data)
 {
-	if (data->receiver == NULL || data->receiving)
-		return 0;
-
 	if (data->local_source_addr != NULL) {
 		if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_SOURCE,
 					data->local_source_addr) != 0) {
-			pw_log_error("can't connect roc receiver to local source address");
+			pw_log_error("can't bind roc receiver to local source address");
 			goto error;
 		}
 	}
 	if (data->local_repair_addr != NULL) {
 		if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_REPAIR,
 					data->local_repair_addr) != 0) {
-			pw_log_error("can't connect roc receiver to local repair address");
+			pw_log_error("can't bind roc receiver to local repair address");
 			goto error;
 		}
 	}
 	if (data->local_control_addr != NULL) {
 		if (roc_receiver_bind(data->receiver, ROC_SLOT_DEFAULT, ROC_INTERFACE_AUDIO_CONTROL,
 					data->local_control_addr) != 0) {
-			pw_log_error("can't connect roc receiver to local control address");
+			pw_log_error("can't bind roc receiver to local control address");
 			goto error;
 		}
 	}
-	data->receiving = true;
+	data->bound = true;
 	return 0;
 error:
 	roc_receiver_unlink(data->receiver, ROC_SLOT_DEFAULT);
 	return -EINVAL;
 }
 
-static int stop_receiving(struct module_roc_source_data *data)
+static void stop_polling(struct module_roc_source_data *data)
 {
-	if (data->receiver == NULL || !data->receiving)
-		return 0;
+	struct timespec zero = { 0, 0 };
 
-	if (roc_receiver_unlink(data->receiver, ROC_SLOT_DEFAULT) != 0)
-		pw_log_warn("can't unlink roc receiver");
+	pw_loop_update_timer(data->loop, data->timer, &zero, &zero, false);
+}
 
-	data->receiving = false;
+static void on_poll_timer(void *d, uint64_t expirations)
+{
+	struct module_roc_source_data *data = d;
+	roc_state state;
 
-	return 0;
+	if (data->playback == NULL)
+		return;
+
+	if (SPA_ATOMIC_LOAD(data->read_failed)) {
+		pw_log_error("failed to read from roc receiver, unloading");
+		goto unload;
+	}
+
+	if (roc_receiver_get_state(data->receiver, &state) != 0) {
+		pw_log_warn("can't get roc receiver state");
+		return;
+	}
+
+	switch (state) {
+	case ROC_STATE_ACTIVE:
+		if (!data->stream_active) {
+			pw_log_info("roc receiver active, activating source");
+			pw_stream_set_active(data->playback, true);
+			data->stream_active = true;
+		}
+		break;
+	case ROC_STATE_IDLE:
+		if (data->stream_active) {
+			pw_log_info("roc receiver idle, deactivating source");
+			pw_stream_set_active(data->playback, false);
+			data->stream_active = false;
+		}
+		break;
+	case ROC_STATE_BROKEN:
+		pw_log_error("roc receiver is broken, unloading");
+		goto unload;
+	case ROC_STATE_CLOSED:
+		pw_log_error("roc receiver is closed, unloading");
+		goto unload;
+	default:
+		break;
+	}
+	return;
+
+unload:
+	stop_polling(data);
+	pw_impl_module_schedule_destroy(data->module);
 }
 
 static void on_stream_state_changed(void *d, enum pw_stream_state old,
@@ -260,11 +318,10 @@ static void on_stream_state_changed(void *d, enum pw_stream_state old,
 		pw_log_error("stream error: %s", error);
 		break;
 	case PW_STREAM_STATE_STREAMING:
-		if (start_receiving(data) < 0)
-			pw_impl_module_schedule_destroy(data->module);
+		pw_log_debug("stream streaming");
 		break;
 	case PW_STREAM_STATE_PAUSED:
-		stop_receiving(data);
+		pw_log_debug("stream paused");
 		break;
 	default:
 		break;
@@ -292,12 +349,17 @@ static const struct pw_proxy_events core_proxy_events = {
 
 static void impl_destroy(struct module_roc_source_data *data)
 {
+	if (data->timer)
+		pw_loop_destroy_source(data->loop, data->timer);
 	if (data->playback)
 		pw_stream_destroy(data->playback);
 	if (data->core && data->do_disconnect)
 		pw_core_disconnect(data->core);
 
 	pw_properties_free(data->playback_props);
+
+	if (data->bound && roc_receiver_unlink(data->receiver, ROC_SLOT_DEFAULT) != 0)
+		pw_log_warn("can't unlink roc receiver");
 
 	roc_receiver_close(data->receiver);
 	roc_context_close(data->context);
@@ -329,6 +391,7 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	struct spa_audio_info_raw info = { 0 };
 	const struct spa_pod *params[1];
 	struct spa_pod_builder b;
+	struct timespec interval;
 	uint32_t n_params;
 	uint8_t buffer[1024];
 	int res;
@@ -425,6 +488,9 @@ static int roc_source_setup(struct module_roc_source_data *data)
 		return res;
 	}
 
+	if ((res = roc_source_bind(data)) < 0)
+		return res;
+
 	data->playback = pw_stream_new(data->core,
 			"roc-source playback", data->playback_props);
 	data->playback_props = NULL;
@@ -445,9 +511,22 @@ static int roc_source_setup(struct module_roc_source_data *data)
 			PW_ID_ANY,
 			PW_STREAM_FLAG_MAP_BUFFERS |
 			PW_STREAM_FLAG_AUTOCONNECT |
+			PW_STREAM_FLAG_INACTIVE |
 			PW_STREAM_FLAG_RT_PROCESS,
 			params, n_params)) < 0)
 		return res;
+
+	data->loop = pw_context_get_main_loop(data->module_context);
+	data->timer = pw_loop_add_timer(data->loop, on_poll_timer, data);
+	if (data->timer == NULL) {
+		res = -errno;
+		pw_log_error("can't create timer source: %m");
+		return res;
+	}
+
+	interval.tv_sec = 0;
+	interval.tv_nsec = POLL_INTERVAL_NSEC;
+	pw_loop_update_timer(data->loop, data->timer, &interval, &interval, false);
 
 	return 0;
 }
