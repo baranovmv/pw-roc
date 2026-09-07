@@ -326,7 +326,8 @@ static int roc_sink_setup(struct module_roc_sink_data *data)
 	spa_zero(sender_config);
 
 	sender_config.frame_encoding.rate = data->rate;
-	sender_config.frame_encoding.format = ROC_FORMAT_PCM_FLOAT32;
+	sender_config.frame_encoding.format = ROC_FORMAT_PCM;
+	sender_config.frame_encoding.subformat = ROC_SUBFORMAT_PCM_FLOAT32;
 	sender_config.fec_encoding = data->fec_code;
 
 	/* Fixed to be the same as ROC sender config above */

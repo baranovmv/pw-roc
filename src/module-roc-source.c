@@ -4,10 +4,10 @@
 /* SPDX-License-Identifier: MIT */
 
 #include <limits.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <spa/utils/atomic.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/param/audio/format-utils.h>
@@ -148,7 +148,7 @@ struct module_roc_source_data {
 
 	bool bound;
 	bool stream_active;
-	bool read_failed;
+	atomic_bool read_failed;
 };
 
 static void stream_destroy(void *d)
@@ -180,7 +180,7 @@ static void playback_process(void *data)
 	buf->datas[0].chunk->size = 0;
 	b->size = 0;
 
-	if (SPA_ATOMIC_LOAD(impl->read_failed)) {
+	if (atomic_load(&impl->read_failed)) {
 		pw_stream_queue_buffer(impl->playback, b);
 		return;
 	}
@@ -191,7 +191,7 @@ static void playback_process(void *data)
 
 	if (roc_receiver_read(impl->receiver, &frame) != 0) {
 		/* Logged and unloaded from the main loop by on_poll_timer(). */
-		SPA_ATOMIC_STORE(impl->read_failed, true);
+		atomic_store(&impl->read_failed, true);
 		frame.samples_size = 0;
 	}
 
@@ -263,7 +263,7 @@ static void on_poll_timer(void *d, uint64_t expirations)
 	if (data->playback == NULL)
 		return;
 
-	if (SPA_ATOMIC_LOAD(data->read_failed)) {
+	if (atomic_load(&data->read_failed)) {
 		pw_log_error("failed to read from roc receiver, unloading");
 		goto unload;
 	}
@@ -407,7 +407,8 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	spa_zero(receiver_config);
 
 	receiver_config.frame_encoding.rate = data->rate;
-	receiver_config.frame_encoding.format = ROC_FORMAT_PCM_FLOAT32;
+	receiver_config.frame_encoding.format = ROC_FORMAT_PCM;
+	receiver_config.frame_encoding.subformat = ROC_SUBFORMAT_PCM_FLOAT32;
 	receiver_config.resampler_profile = data->resampler_profile;
 	receiver_config.resampler_backend = data->resampler_backend;
 	receiver_config.latency_tuner_backend = data->latency_tuner_backend;

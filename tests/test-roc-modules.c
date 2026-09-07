@@ -620,7 +620,8 @@ static int test_roc_sink(void)
 
 	memset(&rc, 0, sizeof(rc));
 	rc.frame_encoding.rate     = RATE;
-	rc.frame_encoding.format   = ROC_FORMAT_PCM_FLOAT32;
+	rc.frame_encoding.format   = ROC_FORMAT_PCM;
+	rc.frame_encoding.subformat = ROC_SUBFORMAT_PCM_FLOAT32;
 	rc.frame_encoding.channels = ROC_CHANNEL_LAYOUT_STEREO;
 	/* Internal clock: roc_receiver_read blocks until a full frame is ready. */
 	rc.clock_source  = ROC_CLOCK_SOURCE_INTERNAL;
@@ -880,7 +881,8 @@ static int test_roc_source(void)
 
 	memset(&sc, 0, sizeof(sc));
 	sc.frame_encoding.rate     = RATE;
-	sc.frame_encoding.format   = ROC_FORMAT_PCM_FLOAT32;
+	sc.frame_encoding.format   = ROC_FORMAT_PCM;
+	sc.frame_encoding.subformat = ROC_SUBFORMAT_PCM_FLOAT32;
 	sc.frame_encoding.channels = ROC_CHANNEL_LAYOUT_STEREO;
 	sc.fec_encoding            = ROC_FEC_ENCODING_DISABLE;
 	/* Internal clock: roc_sender_write paces itself at the nominal rate. */
