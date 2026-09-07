@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - ci_tests
+      - develop
 
   pull_request:
 
@@ -32,7 +33,6 @@ jobs:
           - tarabah/env-fedora
           - tarabah/env-archlinux
           - tarabah/env-opensuse
-          - tarabah/env-alpine
 
     name: x86_64/${{ matrix.image }}
 
